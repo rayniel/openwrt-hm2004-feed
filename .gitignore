@@ -1,0 +1,15 @@
+# Generated OpenWrt and kernel build products
+/build_dir/
+/staging_dir/
+/bin/
+/tmp/
+*.o
+*.ko
+*.mod
+*.mod.c
+*.cmd
+*.symvers
+modules.order
+
+# Generated research artifacts; not needed to build feed packages
+/original/vendor/vmlinux.bin

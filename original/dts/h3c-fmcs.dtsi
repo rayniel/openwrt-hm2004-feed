@@ -1,0 +1,135 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+/*
+ * H3C HM2004-DU FMCS (FTTR M-OLT) FPGA.
+ *
+ * Include this from an7581-h3c-hm2004-du.dts after an7581.dtsi and replace the
+ * placeholder "fmcs" node there with the one below, or delete the placeholder
+ * and keep this file's node.
+ *
+ * The wiring is taken from the stock device tree, recovered from the DTB
+ * appended to the vendor kernel image (mtd2_kernel.bin at file offset 0x21fc):
+ *
+ *   fmcs {
+ *       compatible = "h3c,fmcs";
+ *       spi-controller = <0xb>;          // spi_controller@1fa10000
+ *       fpga-spi-int-gpio = <0x17>;      // GPIO 23
+ *       interrupts = <0x0 0x1a 0x1>;     // GIC SPI 26, level high
+ *       fpga-load-rst-gpio      = <0x0>;
+ *       fpga-load-cfg-done-gpio = <0x0>;
+ *       fpga-load-flag-gpio     = <0x0>;
+ *       fpga-load-clk-gpio      = <0x0>;
+ *       fpga-load-do-gpio       = <0x0>;
+ *   };
+ *
+ * The five fpga-load-* properties are zero in the shipped DTB and no shipped
+ * module reads them; the loader that actually runs, fpga_load.ko, has no
+ * device-tree code at all and drives hard-coded GPIO block bits.  Those bits are
+ * reproduced below, because the bit position within the interrupt/GPIO block is
+ * the GPIO number: the vendor computes an GPIO 23 interrupt field as
+ * (23 & 0xf) * 2 in the 16..31 register, which only works if GPIO N is bit N.
+ *
+ * See docs/REVERSE_ENGINEERING.md sections 1 and 6.
+ */
+
+/ {
+	fmcs: fmcs {
+		compatible = "h3c,fmcs";
+
+		/*
+		 * The stock node wires the FPGA interrupt to GIC SPI 26, which is
+		 * exactly the interrupt the pinctrl node claims in an7581.dtsi:
+		 *
+		 *   system-controller@1fbf0200 {
+		 *       compatible = "syscon", "simple-mfd";
+		 *       reg = <0x0 0x1fbf0200 0x0 0xc0>;
+		 *       en7581_pinctrl: pinctrl {
+		 *           compatible = "airoha,en7581-pinctrl";
+		 *           interrupts = <GIC_SPI 26 IRQ_TYPE_LEVEL_HIGH>;
+		 *           gpio-controller;
+		 *       };
+		 *   };
+		 *
+		 * So the FPGA line arrives through the pinctrl's GPIO interrupt
+		 * controller rather than directly at the GIC.
+		 */
+		interrupt-parent = <&en7581_pinctrl>;
+		interrupts = <23 IRQ_TYPE_LEVEL_HIGH>;
+
+		/*
+		 * Configuration port, driven by the driver's bitstream loader.
+		 *
+		 * All lines are ACTIVE_HIGH because the vendor shifts raw bit
+		 * values: it writes 0 and 1 straight into the GPIO data register.
+		 * nCONFIG is therefore pulsed low then high by setting the
+		 * descriptor to 0 and then 1, which is what the vendor does with
+		 * bit 5.
+		 */
+		nconfig-gpios   = <&en7581_pinctrl 5  GPIO_ACTIVE_HIGH>;
+		rst-gpios       = <&en7581_pinctrl 22 GPIO_ACTIVE_HIGH>;
+		clk-gpios       = <&en7581_pinctrl 29 GPIO_ACTIVE_HIGH>;
+		data-gpios      = <&en7581_pinctrl 30 GPIO_ACTIVE_HIGH>;
+		status-gpios    = <&en7581_pinctrl 27 GPIO_ACTIVE_HIGH>;
+		conf-done-gpios = <&en7581_pinctrl 28 GPIO_ACTIVE_HIGH>;
+
+		/*
+		 * Register transport.
+		 *
+		 * The vendor reaches the FPGA registers over the SoC SPI
+		 * controller at 0x1fa10000 on a chip select of its own.  In the
+		 * 6.18 tree that controller is claimed by the SPI-NAND driver:
+		 *
+		 *   snfi: spi@1fa10000 {
+		 *       compatible = "airoha,en7581-snand";
+		 *       reg = <0x0 0x1fa10000 0x0 0x140>,
+		 *             <0x0 0x1fa11000 0x0 0x160>;
+		 *   };
+		 *
+		 * so there is no generic SPI master to bind to yet.  Two ways
+		 * forward, in order of preference:
+		 *
+		 *   1. Make that controller serve generic transfers (a
+		 *      transfer_one() built on its command engine), then move this
+		 *      node under the controller:
+		 *
+		 *        &snfi {
+		 *            fmcs: fmcs@1 {
+		 *                compatible = "h3c,fmcs";
+		 *                reg = <1>;               // chip select
+		 *                spi-max-frequency = <1000000>;
+		 *                ...interrupt and nconfig/rst/clk/data...
+		 *            };
+		 *        };
+		 *
+		 *   2. Bit-bang the bus instead.  That needs the four lines the
+		 *      FPGA's SPI port is wired to, which the stock device tree
+		 *      does not record and which have to be measured on the board;
+		 *      the vendor firmware never bit-bangs them, so nothing in the
+		 *      firmware identifies them.  Uncomment and fill in once
+		 *      known:
+		 *
+		 *        sck-gpios  = <&en7581_pinctrl ?? GPIO_ACTIVE_HIGH>;
+		 *        mosi-gpios = <&en7581_pinctrl ?? GPIO_ACTIVE_HIGH>;
+		 *        miso-gpios = <&en7581_pinctrl ?? GPIO_ACTIVE_HIGH>;
+		 *        cs-gpios   = <&en7581_pinctrl ?? GPIO_ACTIVE_LOW>;
+		 *        spi-max-frequency = <1000000>;
+		 *
+		 *      Note that if the FPGA shares the bus pins with the boot
+		 *      SPI-NAND, bit-banging them fights the NAND controller and is
+		 *      not safe; check the board before choosing this.
+		 */
+
+		status = "okay";
+	};
+};
+
+/*
+ * Ethernet side of the FTTR data path.
+ *
+ * FmcsFttrEthNetDevInit() in the vendor driver resolves "eth1" and
+ * "eth1.1" .. "eth1.16" by name at load time and fails the whole module if any
+ * one of them is missing.  The OpenWrt board has to provide that naming before
+ * the FMCS module loads, or bring the interfaces up and reload it afterwards.
+ * The port keeps the requirement only for informational purposes: it does not
+ * look the interfaces up, because the FPGA data path here is carried by the
+ * event thread rather than by per-sub-ONU net devices.
+ */

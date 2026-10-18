@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# H3C FMCS (FTTR M-OLT) FPGA driver
+#
+# The FMCS FPGA gives the H3C HM2004-DU its FTTR master-OLT function: it bridges
+# PLOAM and OMCI between up to sixteen sub-ONUs and the SoC.  The driver
+# publishes /dev/fmcs_mci, the molt_ploam and molt_omci net devices, and the
+# genl_* event families that the vendor userspace stack talks to.
+#
+# Say Y to build it in, or M to build the fttr-fmcs module.
+
+config FTTR_FMCS
+	tristate "H3C FMCS FTTR M-OLT FPGA support"
+	depends on ARCH_AIROHA || COMPILE_TEST
+	depends on GPIOLIB
+	select FW_LOADER
+	help
+	  Driver for the FMCS downlink FPGA on the H3C HM2004-DU FTTR gateway.
+	  It exposes the vendor ioctl ABI on /dev/fmcs_mci, the molt_ploam and
+	  molt_omci control net devices, and the genetlink event families used
+	  by the stock PLOAM and OMCI stacks.
+
+	  The FPGA is reached either through a SPI controller (when the device
+	  tree node is a child of one) or by bit-banging GPIO lines named sck,
+	  mosi, miso and cs.  On stock hardware the controller that carries the
+	  FPGA is claimed by the SPI-NAND driver.  The physical GPIO transport
+	  pins have not been identified on the HM2004-DU and must be validated
+	  before use.
+
+	  If unsure, say N.
+
+config FTTR_FMCS_LOAD_AT_PROBE
+	bool "Load the FPGA bitstream at probe time"
+	depends on FTTR_FMCS
+	default y
+	help
+	  Configure the FPGA from /lib/firmware/FTTR_TOP.sbit when the driver
+	  probes, reproducing what the vendor fpga_load.ko module did at load
+	  time.  The bitstream is shifted out of the configuration port MSB
+	  first, byte for byte, exactly as shipped.
+
+	  The /proc/fpgaLoad entry that reports the clock hold times and accepts
+	  "load <t1> <t2> <ignored>" to retune them and reload is built either
+	  way; this option only decides whether a load also happens on probe.
+
+	  Disable this if a bootloader or another component already configures
+	  the FPGA.
